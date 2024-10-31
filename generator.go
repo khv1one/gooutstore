@@ -2,11 +2,12 @@ package gooutstore
 
 import (
 	"context"
+	"database/sql"
 )
 
 // IOutboxGeneratorClient TODO
 type IOutboxGeneratorClient interface {
-	Create(ctx context.Context, messages []Message) error
+	Create(ctx context.Context, tx *sql.Tx, messages []Message) error
 }
 
 // GeneratorOption TODO
@@ -29,9 +30,19 @@ type Generator struct {
 	tableName string
 }
 
+// NewGeneratorWithDefaultClient TODO
+func NewGeneratorWithDefaultClient(db *sql.DB, opts ...GeneratorOption) *Generator {
+	g := NewGenerator(opts...)
+	g.client = newSQLClient(g.tableName, db)
+
+	return g
+}
+
 // NewGenerator TODO
 func NewGenerator(opts ...GeneratorOption) *Generator {
-	g := &Generator{}
+	const defaultTableName = "outbox_messages"
+
+	g := &Generator{tableName: defaultTableName}
 
 	for _, opt := range opts {
 		opt(g)
@@ -41,7 +52,7 @@ func NewGenerator(opts ...GeneratorOption) *Generator {
 }
 
 // Send TODO
-func (g *Generator) Send(ctx context.Context, messages ...IOutboxMessage) error {
+func (g *Generator) Send(ctx context.Context, tx *sql.Tx, messages ...IOutboxMessage) error {
 	encodeMessages := make([]Message, 0, len(messages))
 	for i := 0; i < len(messages); i++ {
 		body, err := encode(messages[i])
@@ -57,5 +68,5 @@ func (g *Generator) Send(ctx context.Context, messages ...IOutboxMessage) error 
 		})
 	}
 
-	return g.client.Create(ctx, encodeMessages)
+	return g.client.Create(ctx, tx, encodeMessages)
 }

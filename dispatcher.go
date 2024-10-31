@@ -2,6 +2,7 @@ package gooutstore
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sync"
 	"time"
@@ -9,14 +10,14 @@ import (
 
 // IOutboxDispatcherClient TODO
 type IOutboxDispatcherClient interface {
-	ReadBatch(ctx context.Context, messageType string) ([]Message, error)
+	ReadBatch(ctx context.Context, messageType string, batchSize int) ([]Message, error)
 	MarkRetry(ctx context.Context, m Message) error
 	MarkBroken(ctx context.Context, m Message) error
 	MarkDone(ctx context.Context, m Message) error
 }
 
 // Logger TODO
-type Logger func(...interface{})
+type Logger func(string, ...interface{})
 
 // DispatcherOption TODO
 type DispatcherOption[T IOutboxMessage] func(*Dispatcher[T])
@@ -34,11 +35,6 @@ func WithMaxRetry[T IOutboxMessage](maxRetry int) DispatcherOption[T] {
 // WithInterval TODO
 func WithInterval[T IOutboxMessage](interval time.Duration) DispatcherOption[T] {
 	return func(d *Dispatcher[T]) { d.interval = interval }
-}
-
-// WithCallback TODO
-func WithCallback[T IOutboxMessage](f func(context.Context, T) error) DispatcherOption[T] {
-	return func(d *Dispatcher[T]) { d.call = f }
 }
 
 // WithDBClient TODO
@@ -70,7 +66,8 @@ type Dispatcher[T IOutboxMessage] struct {
 	errorLogger Logger
 }
 
-func NewDispatcher[T IOutboxMessage](opts ...DispatcherOption[T]) *Dispatcher[T] {
+// NewDispatcher TODO
+func NewDispatcher[T IOutboxMessage](call func(context.Context, T) error, opts ...DispatcherOption[T]) *Dispatcher[T] {
 	const (
 		defaultBatchSize = 100
 		defaultMaxRetry  = 0
@@ -79,17 +76,28 @@ func NewDispatcher[T IOutboxMessage](opts ...DispatcherOption[T]) *Dispatcher[T]
 		defaultName      = "outbox-dispatcher-process"
 	)
 
+	var m T
 	d := &Dispatcher[T]{
-		tableName: defaultTableName,
-		batchSize: defaultBatchSize,
-		maxRetry:  defaultMaxRetry,
-		interval:  defaultInterval,
-		name:      defaultName,
+		tableName:   defaultTableName,
+		batchSize:   defaultBatchSize,
+		maxRetry:    defaultMaxRetry,
+		interval:    defaultInterval,
+		name:        defaultName,
+		call:        call,
+		messageType: m.MessageKind(),
 	}
 
 	for _, opt := range opts {
 		opt(d)
 	}
+
+	return d
+}
+
+// NewDispatcherWithDefaultClient TODO
+func NewDispatcherWithDefaultClient[T IOutboxMessage](db *sql.DB, call func(context.Context, T) error, opts ...DispatcherOption[T]) *Dispatcher[T] {
+	d := NewDispatcher(call, opts...)
+	d.client = newSQLClient(d.tableName, db)
 
 	return d
 }
@@ -112,9 +120,9 @@ func (d *Dispatcher[T]) Start(startCtx context.Context) error {
 				count, allErr, readErr := d.dispatching(ctx)
 				once.Do(func() {
 					firstRun <- readErr
-					ctx = processCtx
 					close(firstRun)
-					return
+
+					ctx = processCtx
 				})
 
 				nextInterval := d.interval
@@ -154,8 +162,9 @@ func (d *Dispatcher[T]) initProcessCtx() context.Context {
 }
 
 func (d *Dispatcher[T]) dispatching(ctx context.Context) (msgCount int, isAllErrors bool, readErr error) {
-	messages, readErr := d.client.ReadBatch(ctx, d.messageType)
+	messages, readErr := d.client.ReadBatch(ctx, d.messageType, d.batchSize)
 	if readErr != nil {
+		// TODO logging error here
 		return 0, false, fmt.Errorf("outbox reading batch failed: %w", readErr)
 	}
 
