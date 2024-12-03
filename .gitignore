@@ -23,3 +23,6 @@ go.work.sum
 
 #vscode
 .vscode
+
+#idea
+.idea
