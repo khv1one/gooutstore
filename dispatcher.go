@@ -2,7 +2,6 @@ package gooutstore
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"sync"
 	"time"
@@ -11,9 +10,11 @@ import (
 // IOutboxDispatcherClient TODO
 type IOutboxDispatcherClient interface {
 	ReadBatch(ctx context.Context, messageType string, batchSize int) ([]Message, error)
-	MarkRetry(ctx context.Context, m Message) error
-	MarkBroken(ctx context.Context, m Message) error
-	MarkDone(ctx context.Context, m Message) error
+	SetDone(ctx context.Context, m Message) error
+	IncRetry(ctx context.Context, m Message) error
+	SetBroken(ctx context.Context, m Message) error
+
+	WithTransaction(ctx context.Context, fn func(context.Context) error) (err error)
 }
 
 // Logger TODO
@@ -22,24 +23,19 @@ type Logger func(string, ...interface{})
 // DispatcherOption TODO
 type DispatcherOption[T IOutboxMessage] func(*Dispatcher[T])
 
-// WithMessageType message type for dispatcher instance
-func WithMessageType[T IOutboxMessage](messageType string) DispatcherOption[T] {
-	return func(d *Dispatcher[T]) { d.messageType = messageType }
-}
-
 // WithMaxRetry TODO
 func WithMaxRetry[T IOutboxMessage](maxRetry int) DispatcherOption[T] {
 	return func(d *Dispatcher[T]) { d.maxRetry = maxRetry }
 }
 
+// WithBatchSize TODO
+func WithBatchSize[T IOutboxMessage](batchSize int) DispatcherOption[T] {
+	return func(d *Dispatcher[T]) { d.batchSize = batchSize }
+}
+
 // WithInterval TODO
 func WithInterval[T IOutboxMessage](interval time.Duration) DispatcherOption[T] {
 	return func(d *Dispatcher[T]) { d.interval = interval }
-}
-
-// WithDBClient TODO
-func WithDBClient[T IOutboxMessage](client IOutboxDispatcherClient) DispatcherOption[T] {
-	return func(d *Dispatcher[T]) { d.client = client }
 }
 
 // WithErrorLogger TODO
@@ -84,7 +80,7 @@ func NewDispatcher[T IOutboxMessage](call func(context.Context, T) error, opts .
 		interval:    defaultInterval,
 		name:        defaultName,
 		call:        call,
-		messageType: m.MessageKind(),
+		messageType: m.Type(),
 	}
 
 	for _, opt := range opts {
@@ -95,9 +91,9 @@ func NewDispatcher[T IOutboxMessage](call func(context.Context, T) error, opts .
 }
 
 // NewDispatcherWithDefaultClient TODO
-func NewDispatcherWithDefaultClient[T IOutboxMessage](db *sql.DB, call func(context.Context, T) error, opts ...DispatcherOption[T]) *Dispatcher[T] {
+func NewDispatcherWithClient[T IOutboxMessage](client IOutboxDispatcherClient, call func(context.Context, T) error, opts ...DispatcherOption[T]) *Dispatcher[T] {
 	d := NewDispatcher(call, opts...)
-	d.client = newSQLClient(d.tableName, db)
+	d.client = client
 
 	return d
 }
@@ -127,6 +123,7 @@ func (d *Dispatcher[T]) Start(startCtx context.Context) error {
 
 				nextInterval := d.interval
 				if readErr != nil && count >= d.batchSize && !allErr {
+					d.errorLogger("outbox processing failed", readErr.Error())
 					nextInterval = 0
 				}
 				timer.Reset(nextInterval)
@@ -162,29 +159,36 @@ func (d *Dispatcher[T]) initProcessCtx() context.Context {
 }
 
 func (d *Dispatcher[T]) dispatching(ctx context.Context) (msgCount int, isAllErrors bool, readErr error) {
-	messages, readErr := d.client.ReadBatch(ctx, d.messageType, d.batchSize)
-	if readErr != nil {
-		// TODO logging error here
-		return 0, false, fmt.Errorf("outbox reading batch failed: %w", readErr)
-	}
+	var (
+		errCount  int
+		keysCount int
+	)
 
-	msgCount = len(messages)
-	if msgCount == 0 {
-		return 0, false, nil
-	}
-
-	groupedMessagesByKey := groupByProperty(messages, func(m Message) string {
-		return m.AggregateKey
-	})
-
-	errCount := 0
-	keysCount := 0
-	for _, messagesWithSameKey := range groupedMessagesByKey {
-		keysCount++
-		if err := d.processMessages(ctx, messagesWithSameKey); err != nil {
-			// TODO move error logging here
-			errCount++
+	if err := d.client.WithTransaction(ctx, func(ctx context.Context) error {
+		messages, readErr := d.client.ReadBatch(ctx, d.messageType, d.batchSize)
+		if readErr != nil {
+			return fmt.Errorf("outbox reading batch failed: %w", readErr)
 		}
+
+		msgCount = len(messages)
+		if msgCount == 0 {
+			return nil
+		}
+
+		groupedMessagesByKey := groupByProperty(messages, func(m Message) string {
+			return m.AggregateKey
+		})
+
+		for _, messagesWithSameKey := range groupedMessagesByKey {
+			keysCount++
+			if err := d.processMessages(ctx, messagesWithSameKey); err != nil {
+				errCount++
+			}
+		}
+
+		return nil
+	}); err != nil {
+		return 0, false, err
 	}
 
 	return msgCount, errCount >= keysCount, nil
@@ -210,14 +214,13 @@ func (d *Dispatcher[T]) processMessage(ctx context.Context, m Message) error {
 	}
 
 	if err := d.call(ctx, decodedBody); err != nil {
-		d.errorLogger("outbox callback function failed", err.Error())
 		d.processError(ctx, m)
 
 		return err
 	}
 
-	if err := d.client.MarkDone(ctx, m); err != nil {
-		d.errorLogger("outbox message was processed successfully, but success mark failed", err.Error())
+	if err := d.client.SetDone(ctx, m); err != nil {
+		d.errorLogger("outbox message was processed successfully, but set success status failed", err.Error())
 
 		return err
 	}
@@ -228,9 +231,9 @@ func (d *Dispatcher[T]) processMessage(ctx context.Context, m Message) error {
 func (d *Dispatcher[T]) processError(ctx context.Context, m Message) {
 	var err error
 	if m.RetryCount >= d.maxRetry && d.maxRetry > 0 {
-		err = d.client.MarkBroken(ctx, m)
+		err = d.client.SetBroken(ctx, m)
 	} else {
-		err = d.client.MarkRetry(ctx, m)
+		err = d.client.IncRetry(ctx, m)
 	}
 
 	if err != nil {

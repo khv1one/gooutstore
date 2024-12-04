@@ -2,12 +2,11 @@ package gooutstore
 
 import (
 	"context"
-	"database/sql"
 )
 
 // IOutboxGeneratorClient TODO
 type IOutboxGeneratorClient interface {
-	Create(ctx context.Context, tx *sql.Tx, messages []Message) error
+	Create(ctx context.Context, messages []Message) error
 }
 
 // GeneratorOption TODO
@@ -30,10 +29,10 @@ type Generator struct {
 	tableName string
 }
 
-// NewGeneratorWithDefaultClient TODO
-func NewGeneratorWithDefaultClient(db *sql.DB, opts ...GeneratorOption) *Generator {
+// NewGeneratorWithClient TODO
+func NewGeneratorWithClient(client IOutboxGeneratorClient, opts ...GeneratorOption) *Generator {
 	g := NewGenerator(opts...)
-	g.client = newSQLClient(g.tableName, db)
+	g.client = client
 
 	return g
 }
@@ -52,7 +51,7 @@ func NewGenerator(opts ...GeneratorOption) *Generator {
 }
 
 // Send TODO
-func (g *Generator) Send(ctx context.Context, tx *sql.Tx, messages ...IOutboxMessage) error {
+func (g *Generator) Send(ctx context.Context, messages ...IOutboxMessage) error {
 	encodeMessages := make([]Message, 0, len(messages))
 	for i := 0; i < len(messages); i++ {
 		body, err := encode(messages[i])
@@ -61,12 +60,12 @@ func (g *Generator) Send(ctx context.Context, tx *sql.Tx, messages ...IOutboxMes
 		}
 
 		encodeMessages = append(encodeMessages, Message{
-			MessageType:  messages[i].MessageKind(),
+			MessageType:  messages[i].Type(),
 			Body:         body,
-			AggregateKey: messages[i].AggregateKey(),
+			AggregateKey: messages[i].Key(),
 			Status:       Pending,
 		})
 	}
 
-	return g.client.Create(ctx, tx, encodeMessages)
+	return g.client.Create(ctx, encodeMessages)
 }
