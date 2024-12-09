@@ -12,11 +12,6 @@ type IOutboxGeneratorClient interface {
 // GeneratorOption TODO
 type GeneratorOption func(*Generator)
 
-// WithGeneratorTableName TODO
-func WithGeneratorTableName(tableName string) GeneratorOption {
-	return func(g *Generator) { g.tableName = tableName }
-}
-
 // WithGeneratorClient TODO
 func WithGeneratorClient(client IOutboxGeneratorClient) GeneratorOption {
 	return func(g *Generator) { g.client = client }
@@ -25,8 +20,6 @@ func WithGeneratorClient(client IOutboxGeneratorClient) GeneratorOption {
 // Generator TODO
 type Generator struct {
 	client IOutboxGeneratorClient
-
-	tableName string
 }
 
 // NewGeneratorWithClient TODO
@@ -39,9 +32,7 @@ func NewGeneratorWithClient(client IOutboxGeneratorClient, opts ...GeneratorOpti
 
 // NewGenerator TODO
 func NewGenerator(opts ...GeneratorOption) *Generator {
-	const defaultTableName = "outbox_messages"
-
-	g := &Generator{tableName: defaultTableName}
+	g := &Generator{}
 
 	for _, opt := range opts {
 		opt(g)

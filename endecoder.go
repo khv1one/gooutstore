@@ -3,7 +3,8 @@ package gooutstore
 import "encoding/json"
 
 func encode(m IOutboxMessage) ([]byte, error) {
-	return json.Marshal(m)
+	b, err := json.Marshal(m)
+	return b, err
 }
 
 func decode[T IOutboxMessage](data []byte) (T, error) {

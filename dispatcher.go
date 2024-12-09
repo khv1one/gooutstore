@@ -123,8 +123,10 @@ func (d *Dispatcher[T]) Start(startCtx context.Context) error {
 
 				nextInterval := d.interval
 				if readErr != nil && count >= d.batchSize && !allErr {
-					d.errorLogger("outbox processing failed", readErr.Error())
-					nextInterval = 0
+					if d.errorLogger != nil {
+						d.errorLogger("outbox processing failed", readErr.Error())
+					}
+					nextInterval = nextInterval * 2
 				}
 				timer.Reset(nextInterval)
 
@@ -207,7 +209,9 @@ func (d *Dispatcher[T]) processMessages(ctx context.Context, messages []Message)
 func (d *Dispatcher[T]) processMessage(ctx context.Context, m Message) error {
 	decodedBody, err := decode[T](m.Body)
 	if err != nil {
-		d.errorLogger("outbox decode message failed", err.Error())
+		if d.errorLogger != nil {
+			d.errorLogger("outbox decode message failed", err.Error())
+		}
 		d.processError(ctx, m)
 
 		return err
@@ -220,7 +224,9 @@ func (d *Dispatcher[T]) processMessage(ctx context.Context, m Message) error {
 	}
 
 	if err := d.client.SetDone(ctx, m); err != nil {
-		d.errorLogger("outbox message was processed successfully, but set success status failed", err.Error())
+		if d.errorLogger != nil {
+			d.errorLogger("outbox message was processed successfully, but set success status failed", err.Error())
+		}
 
 		return err
 	}
@@ -236,8 +242,8 @@ func (d *Dispatcher[T]) processError(ctx context.Context, m Message) {
 		err = d.client.IncRetry(ctx, m)
 	}
 
-	if err != nil {
-		d.errorLogger("outbox process error failed", err.Error())
+	if err != nil && d.errorLogger != nil {
+		d.errorLogger("outbox mark message failed", err.Error())
 	}
 }
 

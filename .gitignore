@@ -27,4 +27,6 @@ go.work.sum
 #idea
 .idea
 
+.DS_Store
+
 cmd
