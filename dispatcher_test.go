@@ -8,13 +8,6 @@ import (
 	"time"
 )
 
-type DispatcherSuite struct {
-}
-
-func DispatcherSuiteInit() DispatcherSuite {
-	return DispatcherSuite{}
-}
-
 type OrderMsg struct {
 	OrderID     int
 	Description string
