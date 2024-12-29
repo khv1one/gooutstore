@@ -52,7 +52,7 @@ func TestGenerator_Send(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := NewClientMock(t)
+			client := newClientMock(t)
 			tt.setupMock(tt.ctx, client, tt.messages)
 
 			g := NewGeneratorWithClient(client)

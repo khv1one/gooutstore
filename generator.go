@@ -4,25 +4,25 @@ import (
 	"context"
 )
 
-// IOutboxGeneratorClient TODO
+// IOutboxGeneratorClient defines the interface for the outbox generator client.
 type IOutboxGeneratorClient interface {
 	Create(ctx context.Context, messages []Message) error
 }
 
-// GeneratorOption TODO
+// GeneratorOption represents a configuration option for the Generator.
 type GeneratorOption func(*Generator)
 
-// WithGeneratorClient TODO
+// WithGeneratorClient sets the client for the Generator.
 func WithGeneratorClient(client IOutboxGeneratorClient) GeneratorOption {
 	return func(g *Generator) { g.client = client }
 }
 
-// Generator TODO
+// Generator is responsible for generating outbox messages.
 type Generator struct {
 	client IOutboxGeneratorClient
 }
 
-// NewGeneratorWithClient TODO
+// NewGeneratorWithClient creates a new Generator with the provided client and options.
 func NewGeneratorWithClient(client IOutboxGeneratorClient, opts ...GeneratorOption) *Generator {
 	g := NewGenerator(opts...)
 	g.client = client
@@ -30,7 +30,7 @@ func NewGeneratorWithClient(client IOutboxGeneratorClient, opts ...GeneratorOpti
 	return g
 }
 
-// NewGenerator TODO
+// NewGenerator creates a new Generator with the provided options.
 func NewGenerator(opts ...GeneratorOption) *Generator {
 	g := &Generator{}
 
@@ -41,7 +41,7 @@ func NewGenerator(opts ...GeneratorOption) *Generator {
 	return g
 }
 
-// Send TODO
+// Send sends the provided messages using the Generator's client.
 func (g *Generator) Send(ctx context.Context, messages ...IOutboxMessage) error {
 	encodeMessages := make([]Message, 0, len(messages))
 	for i := 0; i < len(messages); i++ {

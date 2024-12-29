@@ -1,4 +1,4 @@
-package pgx
+package pgpq
 
 import (
 	"context"
@@ -6,36 +6,37 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/khv1one/gooutstore"
 )
 
 type transactionKey struct{}
 
+// TX defines the interface for a transaction.
 type TX interface {
-	Query(ctx context.Context, query string, args ...any) (pgx.Rows, error)
-	Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// Client represents a PostgreSQL client for outbox messages.
 type Client struct {
-	db                *pgxpool.Pool
+	db                *sql.DB
 	customFromContext func(ctx context.Context) TX
 
 	tableName string
 }
 
-func NewClient(db *pgxpool.Pool) *Client {
+// NewClient creates a new PostgreSQL client.
+func NewClient(db *sql.DB) *Client {
 	return &Client{
 		tableName: "outbox_messages",
 		db:        db,
 	}
 }
 
+// ReadBatch reads a batch of messages from the outbox.
 func (c *Client) ReadBatch(ctx context.Context, messageType string, batchSize int) ([]gooutstore.Message, error) {
 	q := fmt.Sprintf("SELECT id, aggregate_key, status, retry_count, body FROM %s WHERE status IN ($1, $2) AND message_type=$3 ORDER BY id LIMIT $4 FOR UPDATE", c.tableName)
-	rows, err := c.FromContext(ctx).Query(ctx, q, gooutstore.Pending, gooutstore.Retrying, messageType, batchSize)
+	rows, err := c.FromContext(ctx).QueryContext(ctx, q, gooutstore.Pending, gooutstore.Retrying, messageType, batchSize)
 	if err != nil {
 		return nil, err
 	}
@@ -57,27 +58,31 @@ func (c *Client) ReadBatch(ctx context.Context, messageType string, batchSize in
 	return messages, nil
 }
 
+// SetDone marks a message as done.
 func (c *Client) SetDone(ctx context.Context, m gooutstore.Message) error {
 	q := fmt.Sprintf("UPDATE %s SET status = $2 WHERE id = $1", c.tableName)
 
-	_, err := c.FromContext(ctx).Exec(ctx, q, m.ID, gooutstore.Done)
+	_, err := c.FromContext(ctx).ExecContext(ctx, q, m.ID, gooutstore.Done)
 	return err
 }
 
+// IncRetry increments the retry count for a message.
 func (c *Client) IncRetry(ctx context.Context, m gooutstore.Message) error {
 	q := fmt.Sprintf("UPDATE %s SET status = $2, retry_count=retry_count+1 WHERE id = $1", c.tableName)
 
-	_, err := c.FromContext(ctx).Exec(ctx, q, m.ID, gooutstore.Retrying)
+	_, err := c.FromContext(ctx).ExecContext(ctx, q, m.ID, gooutstore.Retrying)
 	return err
 }
 
+// SetBroken marks a message as broken.
 func (c *Client) SetBroken(ctx context.Context, m gooutstore.Message) error {
 	q := fmt.Sprintf("UPDATE %s SET status = $2, retry_count=retry_count+1 WHERE id = $1", c.tableName)
 
-	_, err := c.FromContext(ctx).Exec(ctx, q, m.ID, gooutstore.Broken)
+	_, err := c.FromContext(ctx).ExecContext(ctx, q, m.ID, gooutstore.Broken)
 	return err
 }
 
+// Create creates new outbox messages.
 func (c *Client) Create(ctx context.Context, messages []gooutstore.Message) error {
 	var tx TX
 	if c.customFromContext != nil {
@@ -98,28 +103,31 @@ func (c *Client) Create(ctx context.Context, messages []gooutstore.Message) erro
 	}
 
 	q := fmt.Sprintf("INSERT INTO %s (message_type, aggregate_key, status, retry_count, body) VALUES %s", c.tableName, strings.Join(valueStrings, ","))
-	_, err := tx.Exec(ctx, q, valueArgs...)
+	_, err := tx.ExecContext(ctx, q, valueArgs...)
 	return err
 }
 
+// FromContext retrieves the transaction from the context.
 func (c *Client) FromContext(ctx context.Context) TX {
-	if tx, ok := ctx.Value(transactionKey{}).(pgx.Tx); ok {
+	if tx, ok := ctx.Value(transactionKey{}).(*sql.Tx); ok {
 		return tx
 	}
 
 	return c.db
 }
 
-func (c *Client) ToContext(ctx context.Context, tx pgx.Tx) context.Context {
+// ToContext adds the transaction to the context.
+func (c *Client) ToContext(ctx context.Context, tx *sql.Tx) context.Context {
 	return context.WithValue(ctx, transactionKey{}, tx)
 }
 
+// WithTransaction executes a function within a transaction.
 func (c *Client) WithTransaction(ctx context.Context, fn func(context.Context) error) (err error) {
 	if _, ok := ctx.Value(transactionKey{}).(*sql.Tx); ok {
 		return fn(ctx)
 	}
 
-	tx, err := c.db.Begin(ctx)
+	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction failed: %w", err)
 	}
@@ -128,13 +136,13 @@ func (c *Client) WithTransaction(ctx context.Context, fn func(context.Context) e
 
 	defer func() {
 		if p := recover(); p != nil {
-			tx.Rollback(ctx)
+			tx.Rollback()
 			err = fmt.Errorf("panic: %s", p)
 			return
 		}
 
 		if err != nil {
-			if rErr := tx.Rollback(ctx); err != nil {
+			if rErr := tx.Rollback(); err != nil {
 				err = rErr
 				return
 			}
@@ -142,7 +150,7 @@ func (c *Client) WithTransaction(ctx context.Context, fn func(context.Context) e
 			return
 		}
 
-		if err = tx.Commit(ctx); err != nil {
+		if err = tx.Commit(); err != nil {
 			return
 		}
 	}()

@@ -13,6 +13,7 @@ import (
 
 type transactionKey struct{}
 
+// Client represents a GORM client for outbox messages.
 type Client struct {
 	db                *gorm.DB
 	customFromContext func(ctx context.Context) *gorm.DB
@@ -20,6 +21,7 @@ type Client struct {
 	tableName string
 }
 
+// NewClient creates a new GORM client.
 func NewClient(db *gorm.DB) *Client {
 	return &Client{
 		tableName: "outbox_messages",
@@ -27,6 +29,7 @@ func NewClient(db *gorm.DB) *Client {
 	}
 }
 
+// ReadBatch reads a batch of messages from the outbox.
 func (c *Client) ReadBatch(ctx context.Context, messageType string, batchSize int) ([]gooutstore.Message, error) {
 	rows, err := c.FromContext(ctx).Table(c.tableName).
 		Where("status IN (?, ?)", gooutstore.Pending, gooutstore.Retrying).
@@ -52,24 +55,28 @@ func (c *Client) ReadBatch(ctx context.Context, messageType string, batchSize in
 	return messages, nil
 }
 
+// SetDone marks a message as done.
 func (c *Client) SetDone(ctx context.Context, m gooutstore.Message) error {
 	q := fmt.Sprintf("UPDATE %s SET status = ? WHERE id = ?", c.tableName)
 
 	return c.FromContext(ctx).Exec(q, gooutstore.Done, m.ID).Error
 }
 
+// IncRetry increments the retry count for a message.
 func (c *Client) IncRetry(ctx context.Context, m gooutstore.Message) error {
 	q := fmt.Sprintf("UPDATE %s SET status = ?, retry_count=retry_count+1 WHERE id = ?", c.tableName)
 
 	return c.FromContext(ctx).Exec(q, gooutstore.Retrying, m.ID).Error
 }
 
+// SetBroken marks a message as broken.
 func (c *Client) SetBroken(ctx context.Context, m gooutstore.Message) error {
 	q := fmt.Sprintf("UPDATE %s SET status = ?, retry_count=retry_count+1 WHERE id = ?", c.tableName)
 
 	return c.FromContext(ctx).Exec(q, gooutstore.Broken, m.ID).Error
 }
 
+// Create creates new outbox messages.
 func (c *Client) Create(ctx context.Context, messages []gooutstore.Message) error {
 	var tx *gorm.DB
 	if c.customFromContext != nil {
@@ -94,6 +101,7 @@ func (c *Client) Create(ctx context.Context, messages []gooutstore.Message) erro
 	return err
 }
 
+// FromContext retrieves the transaction from the context.
 func (c *Client) FromContext(ctx context.Context) *gorm.DB {
 	if tx, ok := ctx.Value(transactionKey{}).(*gorm.DB); ok {
 		return tx
@@ -102,10 +110,12 @@ func (c *Client) FromContext(ctx context.Context) *gorm.DB {
 	return c.db
 }
 
+// ToContext adds the transaction to the context.
 func (c *Client) ToContext(ctx context.Context, tx *gorm.DB) context.Context {
 	return context.WithValue(ctx, transactionKey{}, tx)
 }
 
+// WithTransaction executes a function within a transaction.
 func (c *Client) WithTransaction(ctx context.Context, fn func(context.Context) error) (err error) {
 	if _, ok := ctx.Value(transactionKey{}).(*gorm.DB); ok {
 		return fn(ctx)

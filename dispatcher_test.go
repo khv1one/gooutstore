@@ -57,7 +57,7 @@ func TestDispatcher_Start(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := NewClientMock(t)
+			client := newClientMock(t)
 			tt.setupMock(tt.ctx, client)
 
 			d := &Dispatcher[OrderMsg]{client: client, messageType: testMsg.Type(), interval: 1 * time.Second}
@@ -164,7 +164,7 @@ func TestDispatcher_processError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := NewClientMock(t)
+			client := newClientMock(t)
 			tt.setupMock(tt.ctx, client, tt.message)
 
 			d := &Dispatcher[OrderMsg]{
@@ -176,6 +176,176 @@ func TestDispatcher_processError(t *testing.T) {
 			d.processError(tt.ctx, tt.message)
 
 			client.assert()
+		})
+	}
+}
+func TestDispatcher_processMessage(t *testing.T) {
+	testMsg := OrderMsg{
+		OrderID:     1,
+		Description: "Test Order",
+	}
+
+	var (
+		errSetDone = errors.New("set done error")
+		errCall    = errors.New("call error")
+	)
+
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		message   Message
+		setupMock func(ctx context.Context, client *clientMock, call *processingMock, message Message)
+		wantErr   error
+	}{
+		{
+			name: "call function error",
+			ctx:  context.Background(),
+			message: Message{
+				Body: []byte(`{"OrderID":1,"Description":"Test Order"}`),
+			},
+			setupMock: func(ctx context.Context, client *clientMock, call *processingMock, message Message) {
+				call.on("Call", 1, ctx, testMsg).andReturn(errCall)
+				client.on("IncRetry", 1, ctx, message).andReturn(nil)
+			},
+			wantErr: errCall,
+		},
+		{
+			name: "set done error",
+			ctx:  context.Background(),
+			message: Message{
+				Body: []byte(`{"OrderID":1,"Description":"Test Order"}`),
+			},
+			setupMock: func(ctx context.Context, client *clientMock, call *processingMock, message Message) {
+				call.on("Call", 1, ctx, testMsg).andReturn(nil)
+				client.on("SetDone", 1, ctx, message).andReturn(errSetDone)
+			},
+			wantErr: errSetDone,
+		},
+		{
+			name: "process message success",
+			ctx:  context.Background(),
+			message: Message{
+				Body: []byte(`{"OrderID":1,"Description":"Test Order"}`),
+			},
+			setupMock: func(ctx context.Context, client *clientMock, call *processingMock, message Message) {
+				call.on("Call", 1, ctx, testMsg).andReturn(nil)
+				client.on("SetDone", 1, ctx, message).andReturn(nil)
+			},
+			wantErr: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newClientMock(t)
+			call := newProcessingMock(t)
+			tt.setupMock(tt.ctx, client, call, tt.message)
+
+			d := &Dispatcher[OrderMsg]{
+				client:      client,
+				call:        call.Call,
+				messageType: testMsg.Type(),
+			}
+
+			err := d.processMessage(tt.ctx, tt.message)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("processMessage() error = %v, wantErr %v", err, tt.wantErr)
+			}
+
+			client.assert()
+			call.assert()
+		})
+	}
+}
+func TestDispatcher_dispatching(t *testing.T) {
+	testMsg := OrderMsg{
+		OrderID:     1,
+		Description: "Test Order",
+	}
+
+	var (
+		errDB = errors.New("db error")
+	)
+
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		setupMock func(ctx context.Context, client *clientMock, call *processingMock)
+		wantCount int
+		wantErr   error
+	}{
+		{
+			name: "dispatching success with no messages",
+			ctx:  context.Background(),
+			setupMock: func(ctx context.Context, client *clientMock, call *processingMock) {
+				client.on("ReadBatch", 1, ctx, testMsg.Type(), 10).andReturn([]Message{}, nil)
+			},
+			wantCount: 0,
+			wantErr:   nil,
+		},
+		{
+			name: "dispatching success with messages",
+			ctx:  context.Background(),
+			setupMock: func(ctx context.Context, client *clientMock, call *processingMock) {
+				messages := []Message{
+					{Body: []byte(`{"OrderID":1,"Description":"Test Order"}`), AggregateKey: "1"},
+					{Body: []byte(`{"OrderID":2,"Description":"Test Order"}`), AggregateKey: "1"},
+				}
+				client.on("ReadBatch", 1, ctx, testMsg.Type(), 10).andReturn(messages, nil)
+				client.on("SetDone", 2, ctx, messages[0]).andReturn(nil)
+				call.on("Call", 2, ctx, testMsg).andReturn(nil)
+			},
+			wantCount: 2,
+			wantErr:   nil,
+		},
+		{
+			name: "dispatching read batch error",
+			ctx:  context.Background(),
+			setupMock: func(ctx context.Context, client *clientMock, call *processingMock) {
+				client.on("ReadBatch", 1, ctx, testMsg.Type(), 10).andReturn(nil, errDB)
+			},
+			wantCount: 0,
+			wantErr:   errDB,
+		},
+		{
+			name: "dispatching process messages error",
+			ctx:  context.Background(),
+			setupMock: func(ctx context.Context, client *clientMock, call *processingMock) {
+				messages := []Message{
+					{Body: []byte(`{"OrderID":1,"Description":"Test Order"}`), AggregateKey: "1"},
+				}
+				client.on("ReadBatch", 1, ctx, testMsg.Type(), 10).andReturn(messages, nil)
+				client.on("IncRetry", 1, ctx, messages[0]).andReturn(nil)
+				call.on("Call", 1, ctx, testMsg).andReturn(errors.New("processing error"))
+			},
+			wantCount: 1,
+			wantErr:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newClientMock(t)
+			call := newProcessingMock(t)
+			tt.setupMock(tt.ctx, client, call)
+
+			d := &Dispatcher[OrderMsg]{
+				client:      client,
+				call:        call.Call,
+				messageType: testMsg.Type(),
+				batchSize:   10,
+			}
+
+			gotCount, _, err := d.dispatching(tt.ctx)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("dispatching() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if gotCount != tt.wantCount {
+				t.Errorf("dispatching() gotCount = %v, want %v", gotCount, tt.wantCount)
+			}
+
+			client.assert()
+			call.assert()
 		})
 	}
 }
