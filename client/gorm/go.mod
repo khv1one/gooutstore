@@ -3,7 +3,7 @@ module github.com/khv1one/gooutstore/gorm
 go 1.18
 
 require (
-	github.com/khv1one/gooutstore v0.0.1
+	github.com/khv1one/gooutstore v0.0.2
 	gorm.io/gorm v1.25.12
 )
 

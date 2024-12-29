@@ -4,7 +4,7 @@ go 1.21
 
 require (
 	github.com/jackc/pgx/v5 v5.7.1
-	github.com/khv1one/gooutstore v0.0.1
+	github.com/khv1one/gooutstore v0.0.2
 )
 
 require (
